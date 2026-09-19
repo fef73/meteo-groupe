@@ -1,0 +1,184 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Météo Groupe</title>
+
+<!-- Leaflet : bibliothèque de cartes légère, gratuite, pas de clé API requise -->
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+
+<style>
+  body { font-family: system-ui, sans-serif; margin: 0; background: #f4f6f8; }
+  #login-screen {
+    max-width: 320px; margin: 80px auto; padding: 24px;
+    background: white; border-radius: 8px; box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+  }
+  #login-screen input {
+    width: 100%; padding: 10px; margin: 6px 0; box-sizing: border-box;
+    border: 1px solid #ccc; border-radius: 4px;
+  }
+  #login-screen button {
+    width: 100%; padding: 10px; margin-top: 10px;
+    background: #2563eb; color: white; border: none; border-radius: 4px; cursor: pointer;
+  }
+  #erreur { color: #dc2626; font-size: 14px; min-height: 18px; }
+  #app { display: none; }
+  #map { height: 100vh; width: 100%; }
+  .avatar-marker {
+    width: 40px; height: 40px; border-radius: 50%;
+    border: 2px solid white; box-shadow: 0 1px 4px rgba(0,0,0,0.4);
+  }
+</style>
+</head>
+<body>
+
+<!-- ============ ÉCRAN DE CONNEXION ============ -->
+<!-- Affiché tant que personne n'est authentifié -->
+<div id="login-screen">
+  <h2>Météo Groupe</h2>
+  <input type="email" id="email" placeholder="Email" />
+  <input type="password" id="password" placeholder="Mot de passe" />
+  <button onclick="seConnecter()">Se connecter</button>
+  <div id="erreur"></div>
+</div>
+
+<!-- ============ APPLICATION (carte) ============ -->
+<!-- Cachée jusqu'à connexion réussie -->
+<div id="app">
+  <div id="map"></div>
+</div>
+
+<script>
+  // ================================================================
+  // 1. CONFIGURATION FIREBASE
+  // ================================================================
+  // À remplacer par TES valeurs : Console Firebase > Paramètres du
+  // projet > Général > "Vos applications" > config SDK Web.
+  // Ce n'est PAS un secret : la vraie protection vient des règles
+  // de sécurité de la Realtime Database (auth != null), pas de
+  // cette clé qui est visible dans le code source de toute façon.
+  const firebaseConfig = {
+    apiKey: "TON_API_KEY",
+    authDomain: "ton-projet.firebaseapp.com",
+    databaseURL: "https://ton-projet-default-rtdb.firebaseio.com",
+    projectId: "ton-projet",
+  };
+
+  // Chargement des SDK Firebase (compat = syntaxe simple avec firebase.xxx())
+  const scripts = [
+    "https://www.gstatic.com/firebasejs/10.13.0/firebase-app-compat.js",
+    "https://www.gstatic.com/firebasejs/10.13.0/firebase-auth-compat.js",
+    "https://www.gstatic.com/firebasejs/10.13.0/firebase-database-compat.js",
+  ];
+  scripts.forEach(src => document.write(`<script src="${src}"><\/script>`));
+</script>
+
+<script>
+  // ================================================================
+  // 2. INITIALISATION (s'exécute après le chargement des SDK ci-dessus)
+  // ================================================================
+  window.addEventListener("load", () => {
+    firebase.initializeApp(firebaseConfig);
+
+    // On regarde si une session est déjà active (ex: retour sur la page)
+    firebase.auth().onAuthStateChanged((utilisateur) => {
+      if (utilisateur) {
+        demarrerApp(utilisateur);
+      }
+    });
+  });
+
+  // ================================================================
+  // 3. CONNEXION
+  // ================================================================
+  function seConnecter() {
+    const email = document.getElementById("email").value;
+    const motDePasse = document.getElementById("password").value;
+    const erreurDiv = document.getElementById("erreur");
+    erreurDiv.textContent = "";
+
+    firebase.auth().signInWithEmailAndPassword(email, motDePasse)
+      .then((resultat) => demarrerApp(resultat.user))
+      .catch((err) => {
+        // Messages Firebase traduits grossièrement pour l'utilisateur
+        erreurDiv.textContent = "Connexion impossible (identifiants incorrects ?)";
+        console.error(err);
+      });
+  }
+
+  // ================================================================
+  // 4. DÉMARRAGE DE L'APP UNE FOIS CONNECTÉ
+  // ================================================================
+  let carte, marqueurs = {};
+
+  function demarrerApp(utilisateur) {
+    document.getElementById("login-screen").style.display = "none";
+    document.getElementById("app").style.display = "block";
+
+    // On va chercher le nom de groupe de CET utilisateur.
+    // Hypothèse : stocké dans utilisateurs/{uid}/groupe lors de l'inscription.
+    firebase.database().ref("utilisateurs/" + utilisateur.uid + "/groupe")
+      .once("value")
+      .then((snap) => {
+        const nomGroupe = snap.val();
+        if (!nomGroupe) {
+          alert("Aucun groupe associé à ce compte.");
+          return;
+        }
+        initCarte();
+        ecouterGroupe(nomGroupe);
+      });
+  }
+
+  // ================================================================
+  // 5. CARTE LEAFLET
+  // ================================================================
+  function initCarte() {
+    carte = L.map("map").setView([45.56, 5.91], 6); // vue par défaut : France
+    L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
+      attribution: "© OpenStreetMap",
+    }).addTo(carte);
+  }
+
+  // ================================================================
+  // 6. LECTURE TEMPS RÉEL DU GROUPE
+  // ================================================================
+  // .on("value", ...) au lieu de .once() : le callback se redéclenche
+  // automatiquement à CHAQUE changement en base (ex: un membre bouge,
+  // détecté via l'appli AI2). Pas de rechargement de page nécessaire.
+  function ecouterGroupe(nomGroupe) {
+    firebase.database().ref("groupes/" + nomGroupe)
+      .on("value", (snapshot) => {
+        const membres = snapshot.val() || {};
+        mettreAJourMarqueurs(membres);
+      });
+  }
+
+  function mettreAJourMarqueurs(membres) {
+    Object.entries(membres).forEach(([id, m]) => {
+      // m = { prenom, ville, lat, lng, avatarUrl, maj }
+      if (m.lat == null || m.lng == null) return;
+
+      const icone = L.divIcon({
+        html: `<img class="avatar-marker" src="${m.avatarUrl || 'default-avatar.png'}" />`,
+        iconSize: [40, 40],
+        className: "",
+      });
+
+      if (marqueurs[id]) {
+        // Marqueur déjà existant : on le déplace juste
+        marqueurs[id].setLatLng([m.lat, m.lng]);
+      } else {
+        // Nouveau membre : on crée le marqueur
+        marqueurs[id] = L.marker([m.lat, m.lng], { icon: icone })
+          .addTo(carte)
+          .bindPopup(`<b>${m.prenom}</b><br>${m.ville}<br><small>Maj: ${m.maj}</small>`);
+      }
+    });
+  }
+</script>
+
+</body>
+</html>
